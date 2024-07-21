@@ -1,0 +1,259 @@
+---
+title: "boosting"
+format: html
+editor: visual
+---
+#gmb
+```{r}
+# Load necessary libraries
+library(survival)
+library(dplyr)
+library(ggplot2)
+library(gbm)
+library(parallel)
+library(doParallel)
+library(foreach)
+
+# Using the built-in lung dataset in R
+data("lung")
+data <- lung
+
+# Data preprocessing
+data$status <- ifelse(data$status == 2, 1, 0)  # Convert status to binary (0,1)
+
+# Create a survival object
+surv_object <- Surv(time = data$time, event = data$status)
+
+# Define variables
+variables <- c("age", "sex", "ph.ecog", "ph.karno", "pat.karno", "meal.cal", "wt.loss")
+combinations <- unlist(lapply(1:length(variables), function(x) combn(variables, x, simplify = FALSE)), recursive = FALSE)
+
+# Initialize results data frame
+results <- data.frame(Model = character(), p = integer(), AIC = numeric(), BIC = numeric(), RSS = numeric(), R2 = numeric(), Adj_R2 = numeric(), Cp = numeric(), LogLikelihood = numeric(), Cindex = numeric(), Significant = logical(), stringsAsFactors = FALSE)
+coefficients_info <- data.frame(Model = character(), Coefficient = character(), Estimate = numeric(), StdError = numeric(), tStatistic = numeric(), pValue = numeric(), stringsAsFactors = FALSE)
+
+# Calculate metrics for each model
+for (combo in combinations) {
+  formula <- as.formula(paste("surv_object ~", paste(combo, collapse = " + ")))
+  cox_fit <- coxph(formula, data = data)
+  
+  rss <- sum(residuals(cox_fit, type = "deviance")^2)
+  
+  # Calculate R^2 and adjusted R^2
+  n <- nrow(data)
+  p <- length(cox_fit$coefficients)
+  r2 <- 1 - rss / sum((data$time - mean(data$time))^2)
+  adj_r2 <- 1 - (1 - r2) * ((n - 1) / (n - p - 1))
+  
+  mse <- rss / (n - p)
+  cp <- rss / mse - (n - 2 * p)
+  
+  # Calculate log-likelihood
+  log_likelihood <- logLik(cox_fit)[1]
+  
+  # Calculate C-index
+  c_index <- summary(cox_fit)$concordance[1]
+  
+  # Check significance
+  significant <- any(summary(cox_fit)$coefficients[, "Pr(>|z|)"] < 0.05)
+  
+  # Store model results
+  results <- rbind(results, data.frame(
+    Model = paste(combo, collapse = " + "),
+    p = p,
+    AIC = AIC(cox_fit),
+    BIC = BIC(cox_fit),
+    RSS = rss,
+    R2 = r2,
+    Adj_R2 = adj_r2,
+    Cp = cp,
+    LogLikelihood = log_likelihood,
+    Cindex = c_index,
+    Significant = significant
+  ))
+  
+  # Extract model coefficients and significance
+  coeffs <- summary(cox_fit)$coefficients
+  for (i in 1:nrow(coeffs)) {
+    coefficients_info <- rbind(coefficients_info, data.frame(
+      Model = paste(combo, collapse = " + "),
+      Coefficient = rownames(coeffs)[i],
+      Estimate = coeffs[i, "coef"],
+      StdError = coeffs[i, "se(coef)"],
+      tStatistic = coeffs[i, "z"],
+      pValue = coeffs[i, "Pr(>|z|)"]
+    ))
+  }
+}
+
+# Print results
+print(results)
+print(coefficients_info)
+
+# Filter models with significant variables
+significant_models <- results %>% filter(Significant)
+
+# Plot significant models
+significant_plot <- ggplot(significant_models, aes(x = 1, y = seq_along(Model), label = Model)) +
+  geom_text(color = "orange", fontface = "bold") +
+  labs(title = "Models with Significant Variables", x = "", y = "") +
+  theme_void() +
+  theme(axis.text.y = element_blank(), plot.title = element_text(hjust = 0.5))
+
+# Print significant models plot
+print(significant_plot)
+
+# Train and test split
+set.seed(123)
+train_indices <- sample(seq_len(nrow(data)), size = 0.7 * nrow(data))
+train_data <- data[train_indices, ]
+test_data <- data[-train_indices, ]
+
+# Ensure survival_time is present in train and test data
+train_data$survival_time <- train_data$time
+test_data$survival_time <- test_data$time
+
+# Define parameter grid
+param_grid <- expand.grid(n.trees = c(100, 500, 1000), shrinkage = c(0.01, 0.1), interaction.depth = c(1, 3, 5), n.minobsinnode = c(10, 20), stringsAsFactors = FALSE)
+
+# Define custom gbm.satpred function
+gbm.satpred <- function(formula = NULL, train_df = NULL, test_df = NULL, distribution = "coxph", param_grid = NULL, n.trees = 1000, interaction.depth = 1, n.minobsinnode = 10, shrinkage = 0.1, finalmod = FALSE, error.method = c("auto", "OOB", "cv", "test"), ...) {
+  
+  gbm_args <- list(formula = formula, data = train_df, distribution = distribution)
+  if (is.null(param_grid)) {
+    if (is.null(shrinkage)) {
+      param <- expand.grid(n.trees = n.trees, n.minobsinnode = n.minobsinnode, stringsAsFactors = FALSE)
+    } else if (is.null(interaction.depth)) {
+      param <- expand.grid(n.trees = n.trees, shrinkage = shrinkage, n.minobsinnode = n.minobsinnode, stringsAsFactors = FALSE)
+    } else {
+      param <- expand.grid(n.trees = n.trees, shrinkage = shrinkage, interaction.depth = interaction.depth, n.minobsinnode = n.minobsinnode, stringsAsFactors = FALSE)
+    }
+  } else {
+    param <- param_grid
+  }
+  param_args <- as.list(param)
+  gbm_args[names(param_args)] <- param_args
+  new_args <- list(...)
+  if (length(new_args)) gbm_args[names(new_args)] <- new_args
+
+  error.method <- match.arg(error.method)
+  if (!finalmod) {
+    args_match <- match(colnames(param), names(gbm_args), nomatch = FALSE)
+    param_match <- match(names(gbm_args), colnames(param), nomatch = FALSE)
+    error <- lapply(1:NROW(param), function(x){
+      gbm_args[args_match] <- param[x, param_match]
+      fit <- do.call(gbm::gbm, gbm_args)
+      if (is.null(test_df)) test_df <- train_df
+      suppressMessages(
+        if (error.method == "auto") {
+          if (fit$train.fraction < 1) {
+            ..n.trees <- gbm::gbm.perf(fit, method = "test", plot.it = FALSE)
+          } else if (fit$cv.folds > 1 & fit$train.fraction == 1) {
+            ..n.trees <- gbm::gbm.perf(fit, method = "cv", plot.it = FALSE)
+          } else {
+            ..n.trees <- gbm::gbm.perf(fit, method = "OOB", plot.it = FALSE)
+          }
+        } else {
+          ..n.trees <- gbm::gbm.perf(fit, method = error.method, plot.it = FALSE)
+        }
+      )
+      fit$n.trees <- ..n.trees
+      pred <- predict(fit, test_df, fit$n.trees)
+      class(pred) <- c(class(pred), "gbm")
+      all_params <- names(param_args)
+      all_params <- union(c("shrinkage", "n.trees", "interaction.depth", "n.minobsinnode"), all_params)
+      param_temp <- fit[all_params]
+      names(param_temp) <- all_params
+      y <- model.extract(model.frame(formula, data = test_df), "response")
+      
+      # Ensure pred and y lengths match
+      if (length(pred) > length(y)) {
+        pred <- pred[1:length(y)]
+      }
+      
+      # Print lengths to debug
+      print(paste("Length of pred:", length(pred)))
+      print(paste("Length of y:", length(y)))
+      
+      if (length(pred) != length(y)) {
+        stop("Length of predictions 'pred' does not match length of response variable 'y'")
+      }
+      
+      error_list <- list(param_temp, error = 1 - cverror.gbm(pred, y))
+      error_df <- as.data.frame(error_list)
+      return(error_df)
+    })
+    error <- do.call("rbind", error)
+    return(error)
+  } else {
+    fit <- do.call(gbm::gbm, gbm_args)
+    return(fit)
+  }
+}
+
+# Define the cverror function for gbm models
+cverror.gbm <- function(x, y = NULL, ...) {
+  if (is.null(y)) {
+    stop("Response variable 'y' cannot be NULL")
+  }
+  if (length(y) != length(x)) {
+    stop("Length of predictions 'x' does not match length of response variable 'y'")
+  }
+  score <- survival::concordancefit(y, -x)$concordance
+  return(score)
+}
+
+# Function to get average survival curve from a GBM model
+get_avesurv_gbm <- function(gbm_model, data, n.trees) {
+  preds <- predict(gbm_model, data, n.trees = n.trees, type = "response")
+  times <- sort(unique(data$time))
+  avg_hazard <- tapply(preds, data$time, mean, na.rm = TRUE)
+  cum_hazard <- cumsum(avg_hazard[match(times, names(avg_hazard))])
+  avg_surv <- exp(-cum_hazard)
+  return(data.frame(time = times, surv = avg_surv))
+}
+
+# Fit the model using the custom gbm.satpred function
+fit_results <- gbm.satpred(
+  formula = Surv(time, status) ~ age + sex + ph.ecog + ph.karno + pat.karno + meal.cal + wt.loss,
+  train_df = train_data, 
+  test_df = test_data, 
+  param_grid = param_grid
+)
+
+# Print the fit results
+print(fit_results)
+
+# Get the best model based on the minimum error
+best_params <- fit_results[which.min(fit_results$error), ]
+best_model <- gbm.satpred(
+  formula = Surv(time, status) ~ age + sex + ph.ecog + ph.karno + pat.karno + meal.cal + wt.loss,
+  train_df = train_data, 
+  n.trees = best_params$n.trees, 
+  shrinkage = best_params$shrinkage, 
+  interaction.depth = best_params$interaction.depth, 
+  n.minobsinnode = best_params$n.minobsinnode, 
+  finalmod = TRUE
+)
+
+# Print the summary of the best model
+summary(best_model)
+
+# Plotting the fit results (error by number of trees)
+ggplot(fit_results, aes(x = n.trees, y = error, color = as.factor(interaction.depth))) +
+  geom_line() +
+  labs(title = "GBM Model Error by Number of Trees", x = "Number of Trees", y = "Error", color = "Interaction Depth") +
+  theme_minimal()
+
+# Get average survival curve from the best GBM model
+avg_surv <- get_avesurv_gbm(best_model, test_data, best_params$n.trees)
+
+# Plot the average survival curve
+plot(avg_surv$time, avg_surv$surv, type = "l", col = "blue", xlab = "Time", ylab = "Survival Probability", main = "Average Survival Curve")
+
+# Plot the cumulative hazard curve
+plot(avg_surv$time, -log(avg_surv$surv), type = "l", col = "red", xlab = "Time", ylab = "Cumulative Hazard", main = "Cumulative Hazard Curve")
+
+
+```
+
