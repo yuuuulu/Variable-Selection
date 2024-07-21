@@ -1,0 +1,299 @@
+---
+title: "cox-logistic+variables'p rank"
+---
+
+#use ggplot2 to generate all coxph-fixed model's each variables' p-value rank
+
+```{r}
+# 加载必要的包
+library(survival)
+library(dplyr)
+library(ggplot2)
+
+# 使用示例数据集
+data <- lung
+
+# 确保二值变量和其他变量为数值型
+binary_vars <- c("sex", "ph.ecog")  # 这里假设 'sex' 和 'ph.ecog' 是二值变量，实际情况请根据数据集调整
+data[binary_vars] <- lapply(data[binary_vars], function(x) as.numeric(as.factor(x)) - 1)
+
+# 去除包含缺失值的行
+data <- na.omit(data[, c("time", "status", binary_vars, "age", "wt.loss")])
+
+# 创建生存对象
+surv_object <- Surv(time = data$time, event = data$status)
+
+# 定义变量
+variables <- c("sex", "age", "ph.ecog", "wt.loss")
+combinations <- unlist(lapply(1:length(variables), function(x) combn(variables, x, simplify = FALSE)), recursive = FALSE)
+
+# 初始化结果数据框
+coefficients_info <- data.frame(Model = character(), Coefficient = character(), Estimate = numeric(), StdError = numeric(), tStatistic = numeric(), pValue = numeric(), stringsAsFactors = FALSE)
+
+# 计算每个模型的指标
+for (combo in combinations) {
+  formula <- as.formula(paste("surv_object ~", paste(combo, collapse = " + ")))
+  cox_fit <- coxph(formula, data = data)
+  
+  coeffs <- summary(cox_fit)$coefficients
+  for (i in 1:nrow(coeffs)) {
+    coefficients_info <- rbind(coefficients_info, data.frame(
+      Model = paste(combo, collapse = " + "),
+      Coefficient = rownames(coeffs)[i],
+      Estimate = coeffs[i, "coef"],
+      StdError = coeffs[i, "se(coef)"],
+      tStatistic = coeffs[i, "z"],
+      pValue = coeffs[i, "Pr(>|z|)"]
+    ))
+  }
+}
+
+# 筛选出p值小于0.05的点
+significant_coeffs <- coefficients_info %>% filter(pValue < 0.05)
+
+# 绘制p值图
+pvalue_plot <- ggplot(significant_coeffs, aes(x = Coefficient, y = pValue, color = Model)) +
+  geom_point(size = 1) +  # 缩小点的大小
+  labs(title = "P-values of Predictors in Cox Models (p < 0.05)", x = "Predictor", y = "P-value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(breaks = seq(0, 0.05, by = 0.01), limits = c(0, 0.05))
+
+print(pvalue_plot)
+
+
+
+```
+
+# the same for logistic model(intercept could help us analyze dummy variables if there are 2 more categories in one kind of ...)
+
+```{r}
+# 加载必要的包
+library(dplyr)
+library(ggplot2)
+library(broom)
+
+# 使用示例数据集
+data <- lung
+
+# 确保二值变量和其他变量为数值型
+binary_vars <- c("sex", "ph.ecog")  # 这里假设 'sex' 和 'ph.ecog' 是二值变量，实际情况请根据数据集调整
+data[binary_vars] <- lapply(data[binary_vars], function(x) as.numeric(as.factor(x)) - 1)
+
+# 去除包含缺失值的行
+data <- na.omit(data[, c("status", binary_vars, "age", "wt.loss")])
+
+# 将status二值化 (1: event occurred, 0: censored)
+data$status <- ifelse(data$status == 2, 1, 0)
+
+# 定义变量
+variables <- c("sex", "age", "ph.ecog", "wt.loss")
+combinations <- unlist(lapply(1:length(variables), function(x) combn(variables, x, simplify = FALSE)), recursive = FALSE)
+
+# 初始化结果数据框
+coefficients_info <- data.frame(Model = character(), Coefficient = character(), Estimate = numeric(), StdError = numeric(), zValue = numeric(), pValue = numeric(), stringsAsFactors = FALSE)
+
+# 计算每个模型的指标
+for (combo in combinations) {
+  formula <- as.formula(paste("status ~", paste(combo, collapse = " + ")))
+  logit_fit <- glm(formula, data = data, family = binomial)
+  
+  coeffs <- summary(logit_fit)$coefficients
+  for (i in 1:nrow(coeffs)) {
+    coefficients_info <- rbind(coefficients_info, data.frame(
+      Model = paste(combo, collapse = " + "),
+      Coefficient = rownames(coeffs)[i],
+      Estimate = coeffs[i, "Estimate"],
+      StdError = coeffs[i, "Std. Error"],
+      zValue = coeffs[i, "z value"],
+      pValue = coeffs[i, "Pr(>|z|)"]
+    ))
+  }
+}
+
+# 筛选出p值小于0.05的点
+significant_coeffs <- coefficients_info %>% filter(pValue < 0.05)
+
+# 绘制p值图
+pvalue_plot <- ggplot(significant_coeffs, aes(x = Coefficient, y = pValue, color = Model)) +
+  geom_point(size = 1) +  # 缩小点的大小
+  labs(title = "P-values of Predictors in Logistic Regression Models (p < 0.05)", x = "Predictor", y = "P-value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_y_continuous(breaks = seq(0, 0.05, by = 0.01), limits = c(0, 0.05))
+
+print(pvalue_plot)
+
+
+
+```
+
+# aic+bic --compare logistic and coxph models
+
+```{r}
+# 加载必要的包
+library(survival)
+library(dplyr)
+library(ggplot2)
+library(broom)
+
+# 使用示例数据集
+data <- lung
+
+# 确保二值变量和其他变量为数值型
+binary_vars <- c("sex", "ph.ecog")  # 这里假设 'sex' 和 'ph.ecog' 是二值变量，实际情况请根据数据集调整
+data[binary_vars] <- lapply(data[binary_vars], function(x) as.numeric(as.factor(x)) - 1)
+
+# 去除包含缺失值的行
+data <- na.omit(data[, c("time", "status", binary_vars, "age", "wt.loss")])
+
+# 将status二值化 (1: event occurred, 0: censored) for logistic regression
+data$status_logistic <- ifelse(data$status == 2, 1, 0)
+
+# 创建生存对象 for Cox regression
+surv_object <- Surv(time = data$time, event = data$status)
+
+# 定义变量
+variables <- c("sex", "age", "ph.ecog", "wt.loss")
+combinations <- unlist(lapply(1:length(variables), function(x) combn(variables, x, simplify = FALSE)), recursive = FALSE)
+
+# 初始化结果数据框
+cox_results <- data.frame(Model = character(), AIC = numeric(), BIC = numeric(), stringsAsFactors = FALSE)
+logit_results <- data.frame(Model = character(), AIC = numeric(), BIC = numeric(), stringsAsFactors = FALSE)
+
+# 计算每个Cox模型的AIC和BIC
+for (combo in combinations) {
+  formula <- as.formula(paste("surv_object ~", paste(combo, collapse = " + ")))
+  cox_fit <- coxph(formula, data = data)
+  
+  model_info <- data.frame(
+    Model = paste(combo, collapse = " + "),
+    AIC = AIC(cox_fit),
+    BIC = BIC(cox_fit)
+  )
+  
+  cox_results <- rbind(cox_results, model_info)
+}
+
+# 计算每个逻辑回归模型的AIC和BIC
+for (combo in combinations) {
+  formula <- as.formula(paste("status_logistic ~", paste(combo, collapse = " + ")))
+  logit_fit <- glm(formula, data = data, family = binomial)
+  
+  model_info <- data.frame(
+    Model = paste(combo, collapse = " + "),
+    AIC = AIC(logit_fit),
+    BIC = BIC(logit_fit)
+  )
+  
+  logit_results <- rbind(logit_results, model_info)
+}
+
+# 绘制Cox回归模型的AIC和BIC图
+cox_plot <- ggplot(cox_results, aes(x = reorder(Model, AIC), y = AIC)) +
+  geom_point(size = 2, color = "blue") +
+  labs(title = "AIC of Cox Models", x = "Model", y = "AIC") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+
+print(cox_plot)
+
+cox_bic_plot <- ggplot(cox_results, aes(x = reorder(Model, BIC), y = BIC)) +
+  geom_point(size = 2, color = "blue") +
+  labs(title = "BIC of Cox Models", x = "Model", y = "BIC") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+
+print(cox_bic_plot)
+
+# 绘制逻辑回归模型的AIC和BIC图
+logit_plot <- ggplot(logit_results, aes(x = reorder(Model, AIC), y = AIC)) +
+  geom_point(size = 2, color = "red") +
+  labs(title = "AIC of Logistic Regression Models", x = "Model", y = "AIC") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+
+print(logit_plot)
+
+logit_bic_plot <- ggplot(logit_results, aes(x = reorder(Model, BIC), y = BIC)) +
+  geom_point(size = 2, color = "red") +
+  labs(title = "BIC of Logistic Regression Models", x = "Model", y = "BIC") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+
+print(logit_bic_plot)
+
+```
+
+## compare more directly e.g.aic
+
+```{r}
+# 加载必要的包
+library(survival)
+library(dplyr)
+library(ggplot2)
+library(broom)
+
+# 使用示例数据集
+data <- lung
+
+# 确保二值变量和其他变量为数值型
+binary_vars <- c("sex", "ph.ecog")  # 这里假设 'sex' 和 'ph.ecog' 是二值变量，实际情况请根据数据集调整
+data[binary_vars] <- lapply(data[binary_vars], function(x) as.numeric(as.factor(x)) - 1)
+
+# 去除包含缺失值的行
+data <- na.omit(data[, c("time", "status", binary_vars, "age", "wt.loss")])
+
+# 将status二值化 (1: event occurred, 0: censored) for logistic regression
+data$status_logistic <- ifelse(data$status == 2, 1, 0)
+
+# 创建生存对象 for Cox regression
+surv_object <- Surv(time = data$time, event = data$status)
+
+# 定义变量
+variables <- c("sex", "age", "ph.ecog", "wt.loss")
+combinations <- unlist(lapply(1:length(variables), function(x) combn(variables, x, simplify = FALSE)), recursive = FALSE)
+
+# 初始化结果数据框
+results <- data.frame(Model = character(), AIC = numeric(), BIC = numeric(), ModelType = character(), stringsAsFactors = FALSE)
+
+# 计算每个Cox模型的AIC和BIC
+for (combo in combinations) {
+  formula <- as.formula(paste("surv_object ~", paste(combo, collapse = " + ")))
+  cox_fit <- coxph(formula, data = data)
+  
+  model_info <- data.frame(
+    Model = paste(combo, collapse = " + "),
+    AIC = AIC(cox_fit),
+    BIC = BIC(cox_fit),
+    ModelType = "Cox"
+  )
+  
+  results <- rbind(results, model_info)
+}
+
+# 计算每个逻辑回归模型的AIC和BIC
+for (combo in combinations) {
+  formula <- as.formula(paste("status_logistic ~", paste(combo, collapse = " + ")))
+  logit_fit <- glm(formula, data = data, family = binomial)
+  
+  model_info <- data.frame(
+    Model = paste(combo, collapse = " + "),
+    AIC = AIC(logit_fit),
+    BIC = BIC(logit_fit),
+    ModelType = "Logistic"
+  )
+  
+  results <- rbind(results, model_info)
+}
+
+# 绘制AIC图，比较Cox回归模型和逻辑回归模型
+aic_plot <- ggplot(results, aes(x = reorder(Model, AIC), y = AIC, color = ModelType)) +
+  geom_point(size = 2) +
+  labs(title = "AIC Comparison of Cox and Logistic Regression Models", x = "Model", y = "AIC") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip()
+
+print(aic_plot)
+
+```
+
+#conclusion Not only do we know more important variables included, but also we know the logistic models are always demonstrate better than coxph.
