@@ -1,0 +1,149 @@
+---
+title: " selection "
+format: html
+editor: visual
+---
+# model validation
+train/test
+
+# lasso+(booststrap...)stability selection
+
+## 
+```{r}
+library(glmnet)
+library(stabs)
+library(dplyr)
+
+# 使用 mtcars 数据集
+data("mtcars")
+set.seed(537)
+
+# 准备数据
+# 使用所有变量预测 mpg（每加仑英里数）
+x <- model.matrix(mpg ~ ., mtcars)[, -1]  # 创建模型矩阵，排除截距
+y <- mtcars$mpg  # 目标变量为每加仑英里数
+
+# 定义训练集和测试集索引
+train <- sample(1:nrow(mtcars), nrow(mtcars) * 0.7)
+test <- setdiff(1:nrow(mtcars), train)
+
+# Lasso 回归模型
+grid <- 10^seq(10, -2, length = 100)
+lasso.mod <- glmnet(x[train, ], y[train], alpha = 1, lambda = grid)
+plot(lasso.mod)
+
+# 使用交叉验证选择最佳 lambda
+cv.out <- cv.glmnet(x[train, ], y[train], alpha = 1)
+plot(cv.out)
+bestlam <- cv.out$lambda.min
+
+# 在测试集上使用最佳 lambda 进行预测
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = x[test, ])
+mean_squared_error <- mean((lasso.pred - y[test])^2)
+cat("Mean Squared Error: ", mean_squared_error, "\n")
+
+# 提取非零系数
+out <- glmnet(x, y, alpha = 1, lambda = grid)
+lasso.coef <- predict(out, type = "coefficients", s = bestlam)
+non_zero_coef <- lasso.coef[lasso.coef != 0]
+print(non_zero_coef)
+
+# 进行稳定选择 (Stability Selection)
+stabsel_fit <- stabsel(x = x, y = y, fitfun = glmnet.lasso, cutoff = 0.75, PFER = 1)
+
+# 查看稳定选择的结果
+summary(stabsel_fit)
+
+```
+
+# lasso+cox with c-index
+```{r}
+library(glmnet)
+library(readxl)
+library(dplyr)
+library(survival)
+library(Hmisc)
+library(ggplot2)
+data_path <- 
+data0 <- read_excel(data_path, skip = 1)
+set.seed(537)
+
+numeric_vars <- c()
+binary_vars <- c()
+
+
+data0 <- data0 %>%
+  select(all_of(binary_vars), all_of(numeric_vars), "survival_time", "censor") %>%
+  na.omit()
+
+data0 <- data0 %>%
+  mutate(across(all_of(binary_vars), as.factor))
+
+cols_with_one_level <- sapply(data0, function(col) is.factor(col) && length(unique(col)) == 1)
+cols_with_one_level_names <- names(cols_with_one_level[cols_with_one_level])
+data0 <- data0 %>% select(-one_of(cols_with_one_level_names))
+print(cols_with_one_level_names)
+x <- model.matrix(~ . - survival_time - censor, data = data0)[, -1]
+
+y <- Surv(data0$survival_time, data0$censor)
+
+# cross-validation for choosing the best lambda
+cv_glmnet_fit <- cv.glmnet(x, y, family = "cox", alpha = 1)
+
+best_lambda <- cv_glmnet_fit$lambda.min
+cat("Best lambda: ", best_lambda, "\n")
+# fix cox+lasoo
+glmnet_fit <- glmnet(x, y, family = "cox", lambda = best_lambda)
+glmnet_coef <- coef(glmnet_fit)
+glmnet_coef <- data.frame(
+  coef = rownames(glmnet_coef),
+  value = as.vector(glmnet_coef),
+  stringsAsFactors = FALSE
+)
+
+non_zero_coef <- glmnet_coef %>% filter(value != 0)
+print(non_zero_coef)
+# C-index(rcorr.cens package uses 1-c_index for printing)
+risk_scores <- predict(glmnet_fit, newx = x, type = "link")
+c_index <-1- rcorr.cens(risk_scores, y)["C Index"]
+
+cat("C-index: ", c_index, "\n")
+summary(glmnet_fit)
+# plot
+ggplot(non_zero_coef, aes(x = reorder(coef, value), y = value)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Coefficients of Important Variables",
+       x = "Variables",
+       y = "Coefficient Value") +
+  theme_minimal()
+```
+
+# backward
+```{r}
+library(readxl)
+library(dplyr)
+library(survival) 
+library(Hmisc)  # C-index
+
+data1 <- 
+
+
+data1$censor <- as.numeric(data1$censor)
+data1[numeric_vars] <- lapply(data1[numeric_vars], as.numeric)
+data1[binary_vars] <-lapply(data1[binary_vars], as.factor)
+data1 <- na.omit(data1[, c("survival_time", "censor", binary_vars, numeric_vars)])
+
+# full model
+full_formula <- as.formula(paste("Surv(survival_time, censor) ~", paste(c(binary_vars, numeric_vars), collapse = " + ")))
+full_model <- coxph(full_formula, data = data1)
+# backward
+backward_model <- step(full_model, direction = "backward")
+# summary
+summary_model <- summary(backward_model)
+# result of backward-chosen model
+backward_model$concordance
+```
+
+
+
